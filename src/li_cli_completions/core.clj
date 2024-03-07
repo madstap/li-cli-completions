@@ -37,7 +37,7 @@
 
             (or (cli/long? arg) (cli/short? arg))
             ;; TODO: Handle flags like --flag=arg
-            (if-some [{opt-args :args
+            (if-some [{argnames :args
                        argcnt :argcnt
                        completions :completions
                        :as flag}
@@ -45,19 +45,55 @@
               (if (zero? argcnt)
                 (recur new-cmdspec more-args ctx)
                 (if (<= (count more-args) argcnt)
-                  ()
+                  (cond (fn? completions) (completions)
+
+                        (map? completions)
+                        (let [current-arg (->> argnames
+                                               (drop (count more-args))
+                                               first)]
+                          ((get completions current-arg)))
+
+                        :else (seq completions))
                   (recur new-cmdspec (drop argcnt more-args) ctx)))
+              ;; This should probably just give up if we're in :strict? mode.
               (recur new-cmdspec more-args ctx))
 
-            command
-            () ;; TODO: Command positional arg completions.
-
             commands
-            (when-some [next-cmd (cmd-map arg)]
-              (recur (merge (dissoc new-cmdspec :commands :flags)
-                            (cli/to-cmdspec next-cmd))
-                     more-args
-                     (update ctx ::cli/command conj arg)))))))
+            (when-some [next-cmd* (cmd-map arg)]
+              (let [{:keys [argnames completions] :as next-cmd}
+                    (cli/to-cmdspec next-cmd*)
+
+                    argcnt (count argnames)]
+                (if (zero? argcnt)
+                  (recur (merge (dissoc new-cmdspec :commands :flags)
+                                next-cmd)
+                         more-args
+                         (update ctx ::cli/command conj arg))
+                  (if (<= (count more-args) argcnt)
+                    (cond (fn? completions) (completions)
+
+                          (map? completions)
+                          (let [current-arg (->> argnames
+                                                 (drop (count more-args))
+                                                 first)]
+                            ((get completions current-arg)))
+
+                          :else (seq completions))
+                    (recur new-cmdspec (drop argcnt more-args) ctx)))))
+
+            ;; If we get to this point, I don't think there's anything
+            ;; left to do, because positional args are handled in
+            ;; `commands` above, and clis without subcommands don't
+            ;; seem to be able to specify names for positional commands(?).
+            command []))))
+
+(comment
+
+  [(cli/prepare-cmdpairs ["foo <arg1> <arg2>" {}])
+   (cli/prepare-cmdpairs ["foo" #'get-completions])]
+
+
+  )
 
 (def log-file "")
 
@@ -82,25 +118,32 @@
           point (parse-long (System/getenv "COMP_POINT"))
           _ (log :input {:line line, :point point})
           [args word] (args-and-word line point)
-          completions (->> (get-completions cmdspec args word)
-                           (filter-prefix word))]
+          completions (try (->> (get-completions cmdspec args word)
+                                (filter-prefix word))
+                           (catch Throwable _
+                             ;; TODO: log error
+                             ))]
       (log :completions {:completions completions})
       (print-bash-completions completions))))
 
 (defn bash-fn-name [command-name]
+  ;; Dunno what's actually allowed, in practice and theoretically in POSIX
+  ;; or whatever. We just use munge and hope that's good enough ¯\_(ツ)_/¯.
+  ;; https://stackoverflow.com/questions/28114999/what-are-the-rules-for-valid-identifiers-e-g-functions-vars-etc-in-bash
   (str "_" (munge command-name) "_completions"))
 
 (defn bash-script [command-name single-command?]
   (let [fn-name (bash-fn-name command-name)
         completion-args (if single-command?
                           "--shell-completions-complete=bash"
-                          "shell-completions complete bash")]
+                          "shell-completions complete bash")
+        completions-command "${COMP_WORDS[0]}"]
     (str "function " fn-name "()
 {
     export COMP_LINE=${COMP_LINE}
     export COMP_POINT=$COMP_POINT
 
-    RESPONSE=($(${COMP_WORDS[0]} " completion-args "))
+    RESPONSE=($(" completions-command " " completion-args "))
 
     # The first line is a directive.
     # Currently only [next | continue]
