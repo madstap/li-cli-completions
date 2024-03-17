@@ -26,4 +26,6 @@
   (is (= ["xcomp" "ycomp"]
          (completions/get-completions nested1 ["foo"] "")))
   (is (= ["xcomp" "ycomp"]
-         (completions/get-completions nested1 ["foo" "--foo-noarg"] ""))))
+         (completions/get-completions nested1 ["foo" "--foo-noarg"] "")))
+  (is (= ["foo" "bar" "baz"]
+         (completions/get-completions nested1 ["foo" "--root-flag"] ""))))

@@ -41,7 +41,10 @@
                           (completions)
 
                           (map? completions)
-                          ((get completions current-arg))
+                          (let [arg-completions (get completions current-arg)]
+                            (if (fn? arg-completions)
+                              (arg-completions)
+                              (seq arg-completions)))
 
                           :else (seq completions)))
 
@@ -71,7 +74,10 @@
                         (let [current-arg (->> argnames
                                                (drop (count more-args))
                                                first)]
-                          ((get completions current-arg)))
+                          (let [arg-completions (get completions current-arg)]
+                            (if (fn? arg-completions)
+                              (arg-completions)
+                              (seq arg-completions))))
 
                         :else (seq completions))
                   (recur new-cmdspec (drop argcnt more-args) ctx)))
@@ -83,11 +89,9 @@
 
             commands
             (when-some [next-cmd* (cmd-map arg)]
-              (let [{:keys [argnames completions] :as next-cmd}
-                    (cli/to-cmdspec next-cmd*)
-
-                    argcnt (count argnames)]
-                (recur (merge (dissoc new-cmdspec :commands :flags)
+              (let [{:keys [argnames] :as next-cmd}
+                    (cli/to-cmdspec next-cmd*)]
+                (recur (merge (dissoc new-cmdspec :commands :flags :completions)
                               next-cmd)
                        more-args
                        (-> ctx
