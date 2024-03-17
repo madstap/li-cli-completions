@@ -30,6 +30,7 @@
          {::keys [cmd-args] :as ctx} {::cli/command []}]
     (let [{:keys [command commands flagmap] :as new-cmdspec}
           (cli/add-processed-flags cmdspec flags)
+
           cmd-map (into {} (cli/prepare-cmdpairs commands))]
       (cond (empty? args)
             (cond (str/starts-with? word "--")
@@ -51,9 +52,9 @@
                   commands (keys cmd-map)
 
                   command
-                  (when-some [completions (:completions new-cmdspec)]
-                    (cond (fn? completions) (completions)
-                          (not (map? completions)) (seq completions))))
+                  (if (fn? completions)
+                    (completions)
+                    (seq completions)))
 
             (re-find #"^--[^-^=]+=" arg)
             (let [[flag farg] (str/split arg #"=" 2)]
@@ -62,8 +63,7 @@
             (or (cli/long? arg) (cli/short? arg))
             (if-some [{argnames :args
                        argcnt :argcnt
-                       completions :completions
-                       :as flag}
+                       completions :completions}
                       (get flagmap arg)]
               (if (zero? argcnt)
                 (recur new-cmdspec more-args ctx)
@@ -74,7 +74,7 @@
                         (let [current-arg (->> argnames
                                                (drop (count more-args))
                                                first)]
-                          (let [arg-completions (get completions current-arg)]
+                          (when-some [arg-completions (get completions current-arg)]
                             (if (fn? arg-completions)
                               (arg-completions)
                               (seq arg-completions))))
