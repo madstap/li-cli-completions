@@ -3,6 +3,10 @@
             [clojure.string :as str]
             [lambdaisland.cli :as cli]))
 
+(defn log [msg]
+  (when-some [log-file (System/getenv "SHELL_COMPLETIONS_DEBUG")]
+    (spit log-file (str (pr-str msg) "\n") :append true)))
+
 (defn args-and-word
   "Given the line and cursor index, returns the args up to the cursor and the
   current word to be completed as a tuple [args word]."
@@ -20,23 +24,39 @@
         [(concat (butlast words) [opt]) word]
         [(or (butlast words) ()) (or (last words) "")]))))
 
-(defn get-completions [cmdspec args word]
-  (loop [{:keys [flags] :as cmdspec} cmdspec
+(defn get-completions* [cmdspec args word]
+  (loop [{:keys [flags completions] :as cmdspec} cmdspec
          [arg & more-args :as args] args
-         ctx {::cli/command []}]
+         {::keys [cmd-args] :as ctx} {::cli/command []}]
     (let [{:keys [command commands flagmap] :as new-cmdspec}
           (cli/add-processed-flags cmdspec flags)
-
           cmd-map (into {} (cli/prepare-cmdpairs commands))]
       (cond (empty? args)
-            ;; TODO:  This should look at what word starts with first,
-            ;; then fall back to this.
-            (if commands
-              (keys cmd-map)
-              (filter cli/long? flagmap))
+            (cond (str/starts-with? word "--")
+                  (->> flagmap keys (filter cli/long?))
+
+                  cmd-args
+                  (let [[current-arg] cmd-args]
+                    (cond (fn? completions)
+                          (completions)
+
+                          (map? completions)
+                          ((get completions current-arg))
+
+                          :else (seq completions)))
+
+                  commands (keys cmd-map)
+
+                  command
+                  (when-some [completions (:completions new-cmdspec)]
+                    (cond (fn? completions) (completions)
+                          (not (map? completions)) (seq completions))))
+
+            (re-find #"^--[^-^=]+=" arg)
+            (let [[flag farg] (str/split arg #"=" 2)]
+              (recur new-cmdspec (concat [flag farg] more-args) ctx))
 
             (or (cli/long? arg) (cli/short? arg))
-            ;; TODO: Handle flags like --flag=arg
             (if-some [{argnames :args
                        argcnt :argcnt
                        completions :completions
@@ -58,51 +78,28 @@
               ;; This should probably just give up if we're in :strict? mode.
               (recur new-cmdspec more-args ctx))
 
+            cmd-args
+            (recur new-cmdspec more-args (update ctx ::cmd-args next))
+
             commands
             (when-some [next-cmd* (cmd-map arg)]
               (let [{:keys [argnames completions] :as next-cmd}
                     (cli/to-cmdspec next-cmd*)
 
                     argcnt (count argnames)]
-                (if (zero? argcnt)
-                  (recur (merge (dissoc new-cmdspec :commands :flags)
-                                next-cmd)
-                         more-args
-                         (update ctx ::cli/command conj arg))
-                  (if (<= (count more-args) argcnt)
-                    (cond (fn? completions) (completions)
-
-                          (map? completions)
-                          (let [current-arg (->> argnames
-                                                 (drop (count more-args))
-                                                 first)]
-                            ((get completions current-arg)))
-
-                          :else (seq completions))
-                    (recur new-cmdspec (drop argcnt more-args) ctx)))))
-
-            ;; If we get to this point, I don't think there's anything
-            ;; left to do, because positional args are handled in
-            ;; `commands` above, and clis without subcommands don't
-            ;; seem to be able to specify names for positional commands(?).
-            command []))))
+                (recur (merge (dissoc new-cmdspec :commands :flags)
+                              next-cmd)
+                       more-args
+                       (-> ctx
+                           (update ::cli/command conj arg)
+                           (assoc ::cmd-args argnames)))))))))
 
 (comment
 
   [(cli/prepare-cmdpairs ["foo <arg1> <arg2>" {}])
    (cli/prepare-cmdpairs ["foo" #'get-completions])]
 
-
   )
-
-(def log-file "")
-
-(defn log [k m]
-  (when false
-    (spit log-file (str (pr-str [k m]) "\n") :append true)))
-
-(defn print-bash-completions [completions]
-  (run! println (cons "next" completions)))
 
 (defn filter-prefix [prefix completions]
   (cond->> completions
@@ -111,19 +108,26 @@
                       (str/starts-with? prefix))
                   (not= % prefix)))))
 
+(defn get-completions [cmdspec args word]
+  (binding [*out* *err*]
+    (try (->> (get-completions* cmdspec args word)
+              (filter-prefix word))
+         (catch Throwable _
+           ;; TODO: log error
+           ))))
+
+(defn print-bash-completions [completions]
+  (run! println (cons "next" completions)))
+
 (defn print-completions [{:keys [shell]} cmdspec]
   (case shell
     "bash"
     (let [line (System/getenv "COMP_LINE")
           point (parse-long (System/getenv "COMP_POINT"))
-          _ (log :input {:line line, :point point})
+          _ (log [:input {:line line, :point point}])
           [args word] (args-and-word line point)
-          completions (try (->> (get-completions cmdspec args word)
-                                (filter-prefix word))
-                           (catch Throwable _
-                             ;; TODO: log error
-                             ))]
-      (log :completions {:completions completions})
+          completions (get-completions cmdspec args word)]
+      (log [:completions {:completions completions}])
       (print-bash-completions completions))))
 
 (defn bash-fn-name [command-name]
@@ -178,16 +182,16 @@ complete -o nospace -F " fn-name " " command-name)))
                       ["--shell-completions-script=<shell>"
                        {:doc "Print the script for shell completions."
                         :key :shell
-                        :middleware (constantly
-                                     (fn [opts]
-                                       (print-script
-                                        (assoc opts :single-ommand true))))}
+                        :middleware (fn [_cmd]
+                                      (fn [opts]
+                                        (print-script
+                                         (assoc opts :single-ommand true))))}
 
                        "--shell-completions-complete=<shell>"
                        {:key :shell
-                        :middleware (constantly
-                                     (fn [opts]
-                                       (print-completions opts cspec)))}]
+                        :middleware (fn [_cmd]
+                                      (fn [opts]
+                                        (print-completions opts cspec)))}]
                       script-flags)))
 
       (update cspec :commands
@@ -197,7 +201,8 @@ complete -o nospace -F " fn-name " " command-name)))
                        :commands ["script <shell>"
                                   {:command print-script
                                    :doc "Print the script for shell completions."
-                                   :flags script-flags}
+                                   :flags script-flags
+                                   :complete {:shell #{"bash"}}}
 
                                   "complete <shell>"
                                   {:command (fn [opts]

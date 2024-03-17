@@ -1,1 +1,2 @@
-{:deps {com.lambdaisland/cli {:mvn/version "0.4.24"}}}
+{:deps {com.lambdaisland/cli {:mvn/version "0.4.24"}}
+ :tasks {test (apply clojure "-M:kaocha" *command-line-args*)}}
