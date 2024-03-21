@@ -24,6 +24,22 @@
         [(concat (butlast words) [opt]) word]
         [(or (butlast words) ()) (or (last words) "")]))))
 
+(defn invoke-completions
+  ([ctx completions]
+   (invoke-completions ctx completions nil))
+  ([ctx completions current-arg]
+   (binding [cli/*opts* ctx]
+     (cond (fn? completions)
+           (completions)
+
+           (and (some? current-arg) (map? completions))
+           (let [arg-completions (get completions current-arg)]
+             (if (fn? arg-completions)
+               (arg-completions)
+               (seq arg-completions)))
+
+           :else (seq completions)))))
+
 (defn get-completions* [cmdspec args word]
   (loop [{:keys [flags completions] :as cmdspec} cmdspec
          [arg & more-args :as args] args
@@ -31,30 +47,14 @@
     (let [{:keys [command commands flagmap] :as new-cmdspec}
           (cli/add-processed-flags cmdspec flags)
 
-          cmd-map (into {} (cli/prepare-cmdpairs commands))]
+          cmd-map (not-empty (into {} (cli/prepare-cmdpairs commands)))]
       (cond (empty? args)
             (cond (str/starts-with? word "--")
                   (->> flagmap keys (filter cli/long?))
 
-                  cmd-args
-                  (let [[current-arg] cmd-args]
-                    (cond (fn? completions)
-                          (completions)
-
-                          (map? completions)
-                          (let [arg-completions (get completions current-arg)]
-                            (if (fn? arg-completions)
-                              (arg-completions)
-                              (seq arg-completions)))
-
-                          :else (seq completions)))
-
-                  commands (keys cmd-map)
-
-                  command
-                  (if (fn? completions)
-                    (completions)
-                    (seq completions)))
+                  cmd-args (invoke-completions ctx completions (first cmd-args))
+                  cmd-map (keys cmd-map)
+                  command (invoke-completions ctx completions))
 
             (re-find #"^--[^-^=]+=" arg)
             (let [[flag farg] (str/split arg #"=" 2)]
@@ -68,18 +68,8 @@
               (if (zero? argcnt)
                 (recur new-cmdspec more-args ctx)
                 (if (<= (count more-args) argcnt)
-                  (cond (fn? completions) (completions)
-
-                        (map? completions)
-                        (let [current-arg (->> argnames
-                                               (drop (count more-args))
-                                               first)]
-                          (when-some [arg-completions (get completions current-arg)]
-                            (if (fn? arg-completions)
-                              (arg-completions)
-                              (seq arg-completions))))
-
-                        :else (seq completions))
+                  (let [current-arg (nth argnames (count more-args))]
+                    (invoke-completions ctx completions current-arg))
                   (recur new-cmdspec (drop argcnt more-args) ctx)))
               ;; This should probably just give up if we're in :strict? mode.
               (recur new-cmdspec more-args ctx))
@@ -87,8 +77,8 @@
             cmd-args
             (recur new-cmdspec more-args (update ctx ::cmd-args next))
 
-            commands
-            (when-some [next-cmd* (cmd-map arg)]
+            cmd-map
+            (when-some [next-cmd* (get cmd-map arg)]
               (let [{:keys [argnames] :as next-cmd}
                     (cli/to-cmdspec next-cmd*)]
                 (recur (merge (dissoc new-cmdspec :commands :flags :completions)
@@ -96,7 +86,7 @@
                        more-args
                        (-> ctx
                            (update ::cli/command conj arg)
-                           (assoc ::cmd-args argnames)))))))))
+                           (assoc ::cmd-args (not-empty argnames))))))))))
 
 (comment
 
