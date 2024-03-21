@@ -29,8 +29,7 @@
    (invoke-completions ctx completions nil))
   ([ctx completions current-arg]
    (binding [cli/*opts* ctx]
-     (cond (fn? completions)
-           (completions)
+     (cond (fn? completions) (completions)
 
            (and (some? current-arg) (map? completions))
            (let [arg-completions (get completions current-arg)]
@@ -155,14 +154,29 @@
 }
 complete -o nospace -F " fn-name " " command-name)))
 
-(defn print-script
-  [{:keys [shell-completions-command shell single-command]}]
-  (println
-   (case shell
-     "bash" (bash-script shell-completions-command single-command))))
+(defn print-bash-script
+  [{:keys [shell-completions-command single-command]}]
+  (println (bash-script shell-completions-command single-command)))
 
 (defn ensure-flat [x]
   (cond->> x (or (map? x) (nil? x)) (into [] cat)))
+
+(defn add-pairs [cmds-or-flags & pair-colls]
+  (into (ensure-flat cmds-or-flags) cat pair-colls))
+
+(defn bash-script-help [command-name single-command?]
+  (let [command (if single-command?
+                  "--shell-completions-script=bash"
+                  "shell-completions script bash")]
+    (str/join "\n"
+              ["With bash the completion script can be installed"
+               "permanently by creating a file in /etc/bash_completion.d"
+               ""
+               (str "$ " command-name " " command "  | sudo tee /etc/bash_completion.d/" command-name " >/dev/null")
+               ""
+               "or by sourcing the script in .bashrc."
+               ""
+               (str "$ echo 'source <("command-name " " command ")' >> ~/.bashrc")])))
 
 (defn add-completions [cmdspec]
   (let [{command-name :name, :as cspec} (cli/to-cmdspec cmdspec)
@@ -170,48 +184,40 @@ complete -o nospace -F " fn-name " " command-name)))
                       {:doc "The name of this executable."
                        :default command-name}]]
     (if (:command cspec)
-      (update cspec :flags
-              #(into (ensure-flat %)
-                     (concat
-                      ["--shell-completions-script=<shell>"
-                       {:doc "Print the script for shell completions."
-                        :key :shell
-                        :middleware (fn [_cmd]
-                                      (fn [opts]
-                                        (print-script
-                                         (assoc opts :single-ommand true))))}
+      (update cspec :flags add-pairs
+              ["--shell-completions-script=<shell>"
+               {:doc "Print the script for shell completions."
+                :key :shell
+                :middleware (fn [_cmd]
+                              (fn [{:keys [shell] :as opts}]
+                                (case shell
+                                  "bash" (print-bash-script
+                                          (assoc opts :single-ommand true)))))}
 
-                       "--shell-completions-complete=<shell>"
-                       {:key :shell
-                        :middleware (fn [_cmd]
-                                      (fn [opts]
-                                        (print-completions opts cspec)))}]
-                      script-flags)))
+               "--shell-completions-complete=<shell>"
+               {:key :shell
+                :middleware (fn [_cmd]
+                              (fn [opts]
+                                (print-completions opts cspec)))}]
+              script-flags)
 
-      (update cspec :commands
-              #(into (ensure-flat %)
-                     ["shell-completions"
-                      {:doc "Shell completion commands"
-                       :commands ["script <shell>"
-                                  {:command print-script
-                                   :doc "Print the script for shell completions."
-                                   :flags script-flags
-                                   :complete {:shell #{"bash"}}}
+      (update cspec :commands add-pairs
+              ["shell-completions"
+               {:doc "Shell completion commands."
+                :commands ["script"
+                           {:commands
+                            ["bash" {:command print-bash-script
+                                     :doc (bash-script-help command-name false)}]
+                            :doc "Print the script for shell completions."
+                            :flags script-flags}
 
-                                  "complete <shell>"
-                                  {:command (fn [opts]
-                                              (print-completions opts cspec))}]}])))))
+                           "complete <shell>"
+                           {:command (fn [opts]
+                                       (print-completions opts cspec))
+                            :completions {:shell #{"bash"}}}]}]))))
 
 (comment
 
-  ["With bash the completion script can be installed"
-   "permanently by creating a file in /etc/bash_completion.d"
-   "For example: (Change <command> to the name of your command.)"
-   ""
-   (str "$ <command> " command " script bash | sudo tee /etc/bash_completion.d/<command> >/dev/null")
-   ""
-   "or"
-   (str "$ echo 'source <(<command> " command " script bash)' >> ~/.bashrc")]
 
 
   (defn out-to-file-mw [k]
@@ -220,9 +226,6 @@ complete -o nospace -F " fn-name " " command-name)))
         (let [file (get opts k)]
           (binding [*out* (java.io.FileWriter. file)]
             (cmd opts))))))
-
-  ((requiring-resolve `cli/to-cmdspec)
-   (requiring-resolve `cli/to-cmdspec))
 
   (defn late-bound [sym]
     (fn [x]
